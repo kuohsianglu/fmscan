@@ -12,38 +12,6 @@ struct fmscan_config config = {
 	.lescan_max_age = 60,
 };
 
-static void fmscan_connect(struct fmscan_peer *peer)
-{
-	bdaddr_t bdaddr;
-	uint16_t interval, latency, max_ce_length, max_interval, min_ce_length;
-	uint16_t min_interval, supervision_timeout, window;
-	uint8_t initiator_filter, own_bdaddr_type, peer_bdaddr_type;
-
-	str2ba(peer->addr, &bdaddr);
-
-	own_bdaddr_type = LE_PUBLIC_ADDRESS;
-	if (peer->public)
-		peer_bdaddr_type = LE_PUBLIC_ADDRESS;
-	else
-		peer_bdaddr_type = LE_RANDOM_ADDRESS;
-
-	interval = htobs(0x0004);
-	window = htobs(0x0004);
-	initiator_filter = 0;
-	min_interval = htobs(0x000F);
-	max_interval = htobs(0x000F);
-	latency = htobs(0x0000);
-	supervision_timeout = htobs(0x0C80);
-	min_ce_length = htobs(0x0000);
-	max_ce_length = htobs(0x0000);
-
-	if (hci_le_create_conn(fd.fd, interval, window, initiator_filter,
-			       peer_bdaddr_type, bdaddr, own_bdaddr_type, min_interval,
-			       max_interval, latency, supervision_timeout,
-			       min_ce_length, max_ce_length, &peer->handle, 1000) < 0)
-		fprintf(stderr, "%s:%s[%d]\n", __FILE__, __func__, __LINE__);
-}
-
 static void fmscan_le_meta_evt(int len)
 {
 	int hdr_len = 1 + HCI_EVENT_HDR_SIZE;
@@ -51,54 +19,50 @@ static void fmscan_le_meta_evt(int len)
 	evt_le_meta_event *meta;
 	char addr[ETH_ALEN * 3];
 	struct fmscan_peer *peer;
-	uint8_t flags = 0;
-	char name[256];
-	char uuid128[33];
-	char uuid16[5];
 	int offset = 0;
+	char of_pubkey[60];
+	int i;
+
+	memset(of_pubkey, 0, sizeof(of_pubkey));
 
 	meta = (void *)&buf[hdr_len];
 	len -= hdr_len;
 
 	if (meta->subevent != EVT_LE_ADVERTISING_REPORT)
 		return;
+
 	info = (le_advertising_info *)(meta->data + 1);
 
 	if (!info->length)
 		return;
 
-	memset(name, 0, sizeof(name));
-	memset(uuid16, 0, sizeof(uuid16));
-	memset(uuid128, 0, sizeof(uuid128));
-
 	while (offset < info->length) {
 		size_t len = info->data[offset];
-		int i;
+		uint8_t eir_type = info->data[offset + 1];
 
 		if (len + 1 > info->length)
 			return;
 
-		switch(info->data[offset + 1]) {
-		case EIR_NAME_SHORT:
-		case EIR_NAME_COMPLETE:
-			memcpy(name, &info->data[offset + 2], len - 1);
-			break;
-		case EIR_FLAGS:
-			flags = info->data[offset + 2];
-			break;
-		case EIR_UUID128_SOME:
-			if (len - 1 != 16)
-				continue;
-			for (i = 0; i < 16; i++)
-				sprintf(&uuid128[i * 2], "%02X", info->data[offset + 2 + i]);
-			break;
-		case EIR_UUID16_SOME:
-			if (len - 1 != 2)
-				continue;
-			for (i = 0; i < 2; i++)
-				sprintf(&uuid16[i * 2], "%02X", info->data[offset + 2 + i]);
-			break;
-		}
+		uint16_t com_id = info->data[offset + 2] | info->data[offset + 3];
+		uint8_t maf_type = info->data[offset + 4];
+
+		if (eir_type != EIR_MANUFACTURE_SPECIFIC || com_id != APPLE_COM_ID ||
+			maf_type != OFFLINE_FINDING_TYPE || len != OFFLINE_FINDING_LEN)
+			return;
+
+		bdaddr_t addr_be;
+		baswap(&addr_be, &info->bdaddr);
+
+		uint8_t key_2bit = info->data[offset + 29] << 6;
+		uint8_t key_6bit = addr_be.b[0] & 0x3f;
+		addr_be.b[0] = key_2bit | key_6bit;
+
+		for (i = 0; i < 6; i++)
+			sprintf(&of_pubkey[i * 2], "%02x", addr_be.b[i]);
+
+		for (i = 0; i < 22; i++)
+			sprintf(&of_pubkey[i * 2 + 12], "%02x", info->data[offset + 7 + i]);
+
 		offset += len + 1;
 	}
 
@@ -112,27 +76,16 @@ static void fmscan_le_meta_evt(int len)
 		avl_insert(&peer_tree, &peer->avl);
 	}
 	peer->rssi = (int8_t)*(info->data + info->length);
-	if (flags)
-		peer->flags = flags;
-	if (*name)
-		strcpy(peer->name, name);
-	if (*uuid16)
-		strcpy(peer->uuid16, uuid16);
-	if (*uuid128)
-		strcpy(peer->uuid128, uuid128);
+
 	if (info->bdaddr_type == LE_PUBLIC_ADDRESS)
 		peer->public = 1;
+	if (*of_pubkey)
+		strcpy(peer->of_pub_key, of_pubkey);
 
 	printf("* %s (%s)", peer->addr, peer->public ? "public" : "random");
 	printf(" rssi = %d dBm ", peer->rssi);
-	if (*peer->name)
-		printf(" name = %s", peer->name);
-	if (*peer->uuid16)
-		printf(" uuid16 = 0x%s", peer->uuid16);
-	if (*peer->uuid128)
-		printf(" uuid128 = 0x%s", peer->uuid128);
-	if (peer->flags)
-		printf(" flags = 0x%08X", peer->flags);
+	printf(" key = %s ", of_pubkey);
+
 	printf("\n");
 	clock_gettime(CLOCK_MONOTONIC, &peer->ts);
 }
@@ -180,44 +133,6 @@ static void fmscan_open(void)
 		perror("setsockopt");
 }
 
-static void fmscan_con(void)
-{
-	struct hci_conn_list_req *cl;
-	struct hci_conn_info *ci;
-	struct fmscan_peer *peer;
-	int i;
-
-	cl = malloc(10 * sizeof(*ci) + sizeof(*cl));
-	cl->dev_id = hdev;
-	cl->conn_num = 10;
-	ci = cl->conn_info;
-
-	if (ioctl(fd.fd, HCIGETCONNLIST, (void *) cl))
-		return;
-
-	avl_for_each_element(&peer_tree, peer, avl)
-		peer->conn = 0;
-
-	for (i = 0; i < cl->conn_num; i++, ci++) {
-		char addr[18];
-		char *str;
-
-		ba2str(&ci->bdaddr, addr);
-		str = hci_lmtostr(ci->link_mode);
-		peer = avl_find_element(&peer_tree, addr, peer, avl);
-		if (peer) {
-			peer->conn = 1;
-			peer->conn_type = ci->type;
-			peer->conn_handle = ci->handle;
-			peer->conn_state = ci->state;
-		}
-
-		bt_free(str);
-	}
-
-	free(cl);
-}
-
 static void fmscan_lescan(int enable)
 {
 	hci_le_set_scan_parameters(fd.fd, 1, 16, 16, 0, 0, 1000);
@@ -233,14 +148,9 @@ static void fmscan_lescan_abort_cb(struct uloop_timeout *t)
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 
 	fmscan_lescan(0);
-	fmscan_con();
 
 	avl_for_each_element_safe(&peer_tree, peer, avl, tmp) {
-		if (peer->conn)
-			continue;
 		if (ts.tv_sec - peer->ts.tv_sec < config.lescan_max_age) {
-			if (0 && !peer->handle)
-				fmscan_connect(peer);
 			continue;
 		}
 		avl_delete(&peer_tree, &peer->avl);

@@ -19,19 +19,8 @@ static int ubus_device_cb(struct ubus_context *ctx, struct ubus_object *obj,
 		c = blobmsg_open_table(&b, peer->addr);
 		blobmsg_add_u32(&b, "age", ts.tv_sec - peer->ts.tv_sec);
 		blobmsg_add_u32(&b, "rssi", peer->rssi);
-		if (peer->flags)
-			blobmsg_add_u32(&b, "flags", peer->flags);
-		if (*peer->name)
-			blobmsg_add_string(&b, "name", peer->name);
-		if (*peer->uuid16)
-			blobmsg_add_string(&b, "uuid16", peer->uuid16);
-		if (*peer->uuid128)
-			blobmsg_add_string(&b, "uuid128", peer->uuid128);
-		if (peer->conn) {
-			blobmsg_add_u32(&b, "conn_handle", peer->conn_handle);
-			blobmsg_add_u32(&b, "conn_state", peer->conn_state);
-			blobmsg_add_u32(&b, "conn_type", peer->conn_type);
-		}
+		if (*peer->of_pub_key)
+			blobmsg_add_string(&b, "pubkey", peer->of_pub_key);
 		blobmsg_close_table(&b, c);
 	}
 

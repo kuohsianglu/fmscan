@@ -37,6 +37,10 @@
 #define EIR_DEVICE_ID			0x10
 #define EIR_MANUFACTURE_SPECIFIC	0xFF
 
+#define APPLE_COM_ID			0x004c
+#define OFFLINE_FINDING_TYPE		0x12
+#define OFFLINE_FINDING_LEN		30
+
 struct fmscan_config {
 	int lescan_timeout;
 	int lescan_max_age;
@@ -45,20 +49,13 @@ struct fmscan_config {
 struct fmscan_peer {
 	struct avl_node avl;
 
-	char name[256];
 	char addr[ETH_ALEN * 3];
 	int8_t rssi;
 	int public;
-	uint8_t flags;
 	uint16_t handle;
 	struct timespec ts;
-	int conn;
-	int conn_handle;
-	int conn_state;
-	int conn_type;
 
-	char uuid16[5];
-	char uuid128[33];
+	char of_pub_key[64];
 };
 
 extern struct uloop_fd fd;
